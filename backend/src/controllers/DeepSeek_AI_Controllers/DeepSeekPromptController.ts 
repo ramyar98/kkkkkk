@@ -1,0 +1,81 @@
+import { Request, Response, NextFunction } from 'express';
+import { DeepSeekModelService } from '../../services/DeepSeek_AI_Services/DeepSeekModelService'; // خزمەتگوزاری AI
+import { DeepSeekRequestModel } from '../../models/DeepSeek_AI_Models/DeepSeekRequest';
+import { v4 as uuidv4 } from 'uuid';
+import Logger from '../../utils/Logger/Logger';
+
+const deepSeekModelService = new DeepSeekModelService();
+
+/**
+ * @function generateCodeWithDeepSeek - ناردنی داواکارییەکی دروستکردنی کۆد بۆ مۆدێلی DeepSeek AI
+ */
+export const generateCodeWithDeepSeek = async (req: Request, res: Response, next: NextFunction) => {
+    const startTime = Date.now();
+    let requestId = uuidv4();
+    
+    try {
+        const { prompt, projectContext, modelName = 'DeepSeek-V2' } = req.body;
+
+        if (!prompt || !projectContext) {
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'پێویستە Prompt و Contextی پڕۆژە دیاری بکرێن بۆ دروستکردنی کۆد.' 
+            });
+        }
+        
+        // 1. داواکردنی وەڵام لە DeepSeek Service (لۆژیکی پەیوەندی دەرەکی لەوێیە)
+        const aiResponse = await deepSeekModelService.getAICompletion({
+            prompt,
+            context: projectContext,
+            modelName,
+        });
+
+        const responseTimeMs = Date.now() - startTime;
+        
+        // 2. تۆمارکردنی داواکاری و وەڵام لە داتابەیس (گرنگە بۆ چاودێری)
+        const deepSeekRecord = new DeepSeekRequestModel({
+            requestId,
+            sourceAgentId: 'USER_INTERFACE_REQUEST', // یان Agent ID ئەگەر لە Agentەوە بێت
+            modelName,
+            promptHash: deepSeekModelService.calculatePromptHash(prompt + projectContext), // بۆ دۆزینەوەی دووبارە
+            inputTokens: aiResponse.usage.inputTokens,
+            outputTokens: aiResponse.usage.outputTokens,
+            responseTimeMs,
+            requestData: { prompt, context: projectContext, temperature: 0.7 }, // نموونە
+            responseData: { success: true, result: aiResponse.result }
+        });
+        await deepSeekRecord.save();
+        
+        Logger.info(`DeepSeek code generation success. Time: ${responseTimeMs}ms.`, { requestId });
+
+        // 3. ناردنەوەی وەڵام
+        res.status(200).json({
+            status: 'success',
+            data: aiResponse.result,
+            metadata: {
+                time: responseTimeMs,
+                tokens: aiResponse.usage
+            }
+        });
+
+    } catch (error) {
+        const responseTimeMs = Date.now() - startTime;
+        // تۆمارکردنی هەڵە لە داتابەیس
+        const errorRecord = new DeepSeekRequestModel({
+            requestId,
+            sourceAgentId: 'USER_INTERFACE_REQUEST',
+            modelName: req.body.modelName || 'Unknown',
+            promptHash: 'N/A',
+            inputTokens: 0,
+            outputTokens: 0,
+            responseTimeMs,
+            requestData: req.body,
+            responseData: { success: false, error: (error as Error).message }
+        });
+        // لەبەر خێرایی، لێرەدا await بەکار ناهێنین بۆ تۆمارکردن
+        errorRecord.save().catch(e => Logger.error('Failed to save AI error record', e));
+        
+        Logger.error('DeepSeek generation failed:', { error: (error as Error).message, requestId });
+        next(error); 
+    }
+};
